@@ -9,7 +9,7 @@ import { PublicKey } from '@solana/web3.js'
 
 export const swap = async () => {
   const raydium = await initSdk()
-  const amountIn = 500
+  const amountIn = 8_333_333 // ~0.00833 SOL, approximately $1 USD
   const inputMint = NATIVE_MINT.toBase58()
   const poolId = '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2' // SOL-USDC pool
 
@@ -104,4 +104,14 @@ export const swap = async () => {
 }
 
 /** uncomment code below to execute */
-// swap()
+swap()
+
+/** The swap function now automatically uses the hot wallet from the default location:
+ * /Volumes/LaCie/movies/billions/episode one/
+ * 
+ * It reads the hot-wallet-info.txt file to get the password and wallet file name,
+ * then loads the wallet automatically.
+ * 
+ * Simply call:
+ * swap()
+ */
