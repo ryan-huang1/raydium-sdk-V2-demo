@@ -1,15 +1,100 @@
 import { ApiV3PoolInfoStandardItem, AmmV4Keys, AmmRpcData } from '@raydium-io/raydium-sdk-v2'
-import { initSdk, txVersion } from '../config'
+import { initSdk, txVersion, connection } from '../config'
 import BN from 'bn.js'
 import { isValidAmm } from './utils'
 import Decimal from 'decimal.js'
 import { NATIVE_MINT } from '@solana/spl-token'
 import { printSimulateInfo } from '../util'
 import { PublicKey } from '@solana/web3.js'
+import bs58 from 'bs58'
+
+/**
+ * Gets priority fee estimate from Helius API
+ * @param transaction - Serialized transaction in Base58
+ * @param priorityLevel - Priority level (Min, Low, Medium, High, VeryHigh, UnsafeMax)
+ * @returns The estimated priority fee in microLamports
+ */
+async function getPriorityFeeEstimate(transaction: string, priorityLevel: string = 'Medium') {
+  console.log(`Getting ${priorityLevel} priority fee estimate...`)
+  
+  try {
+    // First try with all priority levels
+    const response = await fetch(connection.rpcEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: '1',
+        method: 'getPriorityFeeEstimate',
+        params: [
+          {
+            transaction,
+            options: { 
+              includeAllPriorityFeeLevels: true
+            }
+          }
+        ]
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (data.error) {
+      console.error('Error getting priority fee:', data.error);
+      return 10000; // Default fallback
+    }
+    
+    if (data.result.priorityFeeLevels) {
+      console.log('All priority fee levels:');
+      console.log(JSON.stringify(data.result.priorityFeeLevels, null, 2));
+      
+      // Select the appropriate level
+      let selectedFee;
+      switch(priorityLevel) {
+        case 'Min':
+          selectedFee = data.result.priorityFeeLevels.min;
+          break;
+        case 'Low':
+          selectedFee = data.result.priorityFeeLevels.low;
+          break;
+        case 'Medium':
+          selectedFee = data.result.priorityFeeLevels.medium;
+          break;
+        case 'High':
+          selectedFee = data.result.priorityFeeLevels.high;
+          break;
+        case 'VeryHigh':
+          selectedFee = data.result.priorityFeeLevels.veryHigh;
+          break;
+        case 'UnsafeMax':
+          selectedFee = data.result.priorityFeeLevels.unsafeMax;
+          break;
+        default:
+          selectedFee = data.result.priorityFeeLevels.medium;
+      }
+      
+      // Ensure minimum fee of 10000 microLamports
+      selectedFee = Math.max(selectedFee, 10000);
+      console.log(`Selected priority fee (${priorityLevel}):`, selectedFee);
+      return selectedFee;
+    } else if (data.result.priorityFeeEstimate) {
+      // Ensure minimum fee of 10000 microLamports
+      const fee = Math.max(data.result.priorityFeeEstimate, 10000);
+      console.log(`Default priority fee:`, fee);
+      return fee;
+    }
+    
+    return 10000; // Default fallback
+  } catch (error) {
+    console.error('Error fetching priority fee:', error);
+    return 10000; // Default fallback
+  }
+}
 
 export const swap = async () => {
   const raydium = await initSdk()
-  const amountIn = 8_333_333 // ~0.00833 SOL, approximately $1 USD
+  // Set amount to ~$0.25 USD worth of SOL (at $120 per SOL)
+  const amountIn = 2_083_333 // ~0.00208 SOL, approximately $0.25 USD
   const inputMint = NATIVE_MINT.toBase58()
   const poolId = '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2' // SOL-USDC pool
 
@@ -66,7 +151,8 @@ export const swap = async () => {
       .toDecimalPlaces(mintOut.decimals)} ${mintOut.symbol || mintOut.address}`
   )
 
-  const { execute } = await raydium.liquidity.swap({
+  // First create transaction without priority fee to get a serialized version for estimation
+  const { transaction, execute } = await raydium.liquidity.swap({
     poolInfo,
     poolKeys,
     amountIn: new BN(amountIn),
@@ -74,30 +160,34 @@ export const swap = async () => {
     fixedSide: 'in',
     inputMint: mintIn.address,
     txVersion,
+  })
 
-    // optional: set up token account
-    // config: {
-    //   inputUseSolBalance: true, // default: true, if you want to use existed wsol token account to pay token in, pass false
-    //   outputUseSolBalance: true, // default: true, if you want to use existed wsol token account to receive token out, pass false
-    //   associatedOnly: true, // default: true, if you want to use ata only, pass true
-    // },
+  // Serialize transaction for priority fee estimation
+  const serializedTx = bs58.encode(transaction.serialize());
+  
+  // Get priority fee estimate from Helius API (using High priority)
+  const priorityFee = await getPriorityFeeEstimate(serializedTx, 'High');
+  
+  // Create the transaction again but with the priority fee
+  const { transaction: txWithPriorityFee, execute: executeWithPriorityFee } = await raydium.liquidity.swap({
+    poolInfo,
+    poolKeys,
+    amountIn: new BN(amountIn),
+    amountOut: out.minAmountOut,
+    fixedSide: 'in',
+    inputMint: mintIn.address,
+    txVersion,
 
-    // optional: set up priority fee here
-    // computeBudgetConfig: {
-    //   units: 600000,
-    //   microLamports: 46591500,
-    // },
-
-    // optional: add transfer sol to tip account instruction. e.g sent tip to jito
-    // txTipConfig: {
-    //   address: new PublicKey('96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5'),
-    //   amount: new BN(10000000), // 0.01 sol
-    // },
+    // Set priority fee using the estimate
+    computeBudgetConfig: {
+      units: 600000,
+      microLamports: priorityFee,
+    },
   })
 
   printSimulateInfo()
   // don't want to wait confirm, set sendAndConfirm to false or don't pass any params to execute
-  const { txId } = await execute({ sendAndConfirm: true })
+  const { txId } = await executeWithPriorityFee({ sendAndConfirm: true })
   console.log(`swap successfully in amm pool:`, { txId: `https://explorer.solana.com/tx/${txId}` })
 
   process.exit() // if you don't want to end up node execution, comment this line
